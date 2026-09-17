@@ -1,0 +1,42 @@
+name: Label sync
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/labels.yml"]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create or update labels
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const text = fs.readFileSync('.github/labels.yml', 'utf8');
+            // 간단한 YAML 파서: - name / color / description 형식만 지원
+            const labels = [];
+            for (const line of text.split('\n')) {
+              const m = line.match(/^\s*-?\s*(name|color|description):\s*"?([^"]*)"?\s*$/);
+              if (!m) continue;
+              if (m[1] === 'name') labels.push({ name: m[2] });
+              else labels[labels.length - 1][m[1]] = m[2];
+            }
+            const { owner, repo } = context.repo;
+            for (const l of labels) {
+              try {
+                await github.rest.issues.updateLabel({ owner, repo, name: l.name, color: l.color, description: l.description });
+                core.info(`updated: ${l.name}`);
+              } catch (e) {
+                if (e.status !== 404) throw e;
+                await github.rest.issues.createLabel({ owner, repo, name: l.name, color: l.color, description: l.description });
+                core.info(`created: ${l.name}`);
+              }
+            }

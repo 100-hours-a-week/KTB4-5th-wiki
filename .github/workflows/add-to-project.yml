@@ -1,0 +1,19 @@
+name: Add to project board
+
+# 조직 Projects 보드를 만든 뒤 설정한다.
+# - Repository variable PROJECT_URL: https://github.com/orgs/100-hours-a-week/projects/<번호>
+# - Repository secret PROJECT_TOKEN: project 쓰기 권한이 있는 fine-grained PAT
+# 설정 전에는 실행되지 않는다. 파트 레포에도 같은 파일을 복사한다.
+on:
+  issues:
+    types: [opened, transferred]
+
+jobs:
+  add:
+    if: ${{ vars.PROJECT_URL != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: ${{ vars.PROJECT_URL }}
+          github-token: ${{ secrets.PROJECT_TOKEN }}

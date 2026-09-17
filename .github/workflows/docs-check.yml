@@ -1,0 +1,50 @@
+name: Docs check
+
+on:
+  pull_request:
+    paths: ["docs/**", "AGENTS.md"]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check relative links
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          root = pathlib.Path('.')
+          files = [root / 'AGENTS.md', *root.glob('docs/**/*.md')]
+          bad = []
+          for f in files:
+              text = f.read_text(encoding='utf-8')
+              text = re.sub(r'```.*?```', '', text, flags=re.S)  # 코드 블록 제외
+              for target in re.findall(r'\]\(([^)\s]+)\)', text):
+                  if re.match(r'^(https?:|mailto:|#)', target):
+                      continue
+                  path = target.split('#')[0]
+                  # 파트 레포 템플릿은 복사될 위치 기준 링크이므로 제외
+                  if 'templates/' in str(f):
+                      continue
+                  if not (f.parent / path).exists():
+                      bad.append(f'{f}: {target}')
+          if bad:
+              print('깨진 상대 링크:')
+              print('\n'.join(bad))
+              sys.exit(1)
+          print(f'{len(files)}개 문서 링크 확인 완료')
+          PY
+
+      - name: Check related issue in PR body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+            if (!/#\d+/.test(body)) {
+              core.setFailed('PR 본문에 근거가 된 논의 이슈 번호(#번호)를 적어주세요.');
+            }

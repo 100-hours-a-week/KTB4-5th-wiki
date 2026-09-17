@@ -1,0 +1,30 @@
+name: Final conclusion label
+
+# 이슈 댓글이 "최종 결론" 또는 "최종 논의 결과"로 시작하면 `문서반영` 라벨을 붙인다.
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  label:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = (context.payload.comment.body || '').trim();
+            const firstLine = body.split('\n')[0].replace(/^[#>*\s]+/, '');
+            if (!/^(최종\s*결론|최종\s*논의\s*결과)/.test(firstLine)) {
+              core.info('최종 결론 댓글이 아니므로 건너뜀');
+              return;
+            }
+            const { owner, repo } = context.repo;
+            await github.rest.issues.addLabels({
+              owner, repo,
+              issue_number: context.payload.issue.number,
+              labels: ['문서반영'],
+            });

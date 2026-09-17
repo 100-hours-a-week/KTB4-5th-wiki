@@ -1,0 +1,180 @@
+name: Daily agent brief
+
+# 매일 오전 9시(KST)에 에이전트별로 확인할 이슈·PR을 모아 브리프 이슈에 댓글로 공유한다.
+# AI를 호출하지 않고 GitHub 데이터만 모은다. 실제 문서 초안·불일치 확인은 브리프를 보고 사람이 에이전트를 실행한다.
+#
+# 선택 설정 (Settings > Secrets and variables > Actions)
+# - variable AGENT_REPOS  : 함께 볼 레포 목록, 쉼표 구분 (예: 100-hours-a-week/KTB4-5th-wiki,100-hours-a-week/<BE 레포>)
+#                           비우면 이 레포만 본다.
+# - variable PROJECT_URL  : 조직 Projects 보드 URL. 설정하면 보드 상태별 개수를 함께 보여준다.
+# - secret   PROJECT_TOKEN: 다른 레포·Projects 보드 읽기 권한이 있는 PAT. 없으면 GITHUB_TOKEN으로 이 레포만 읽는다.
+# - secret   DISCORD_WEBHOOK_URL: 설정하면 같은 브리프 요약을 디스코드 채널에도 보낸다.
+on:
+  schedule:
+    - cron: "0 0 * * *" # 매일 00:00 UTC = 09:00 KST (GitHub 사정으로 몇 분 늦을 수 있음)
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build and post brief
+        uses: actions/github-script@v7
+        env:
+          AGENT_REPOS: ${{ vars.AGENT_REPOS }}
+          PROJECT_URL: ${{ vars.PROJECT_URL }}
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        with:
+          script: |
+            const home = context.repo; // 브리프를 올리는 wiki 레포
+            const reader = process.env.PROJECT_TOKEN
+              ? getOctokit(process.env.PROJECT_TOKEN)
+              : github;
+            const repos = (process.env.AGENT_REPOS || `${home.owner}/${home.repo}`)
+              .split(',').map(s => s.trim()).filter(Boolean)
+              .map(s => { const [owner, repo] = s.split('/'); return { owner, repo, full: s }; });
+            const isHome = r => r.owner === home.owner && r.repo === home.repo;
+
+            const now = new Date();
+            const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            const kstDate = new Date(now.getTime() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+            const link = (r, n, title) => `[${isHome(r) ? '' : r.repo}#${n}](https://github.com/${r.full}/issues/${n}) ${title}`;
+            const partOf = labels => labels.map(l => (typeof l === 'string' ? l : l.name))
+              .filter(n => ['BE', 'FE', 'AI', 'Cloud'].includes(n)).join('·') || '파트 없음';
+
+            async function listAll(fn, params) {
+              try { return await reader.paginate(fn, { per_page: 100, ...params }); }
+              catch (e) { core.warning(`${params.owner}/${params.repo} 조회 실패: ${e.message}`); return []; }
+            }
+
+            // ── 데이터 수집 ─────────────────────────────
+            const data = [];
+            for (const r of repos) {
+              const recentIssues = (await listAll(reader.rest.issues.listForRepo, {
+                owner: r.owner, repo: r.repo, state: 'all', since: since.toISOString(),
+              }));
+              const openIssues = (await listAll(reader.rest.issues.listForRepo, {
+                owner: r.owner, repo: r.repo, state: 'open',
+              })).filter(i => !i.pull_request);
+              const pulls = await listAll(reader.rest.pulls.list, {
+                owner: r.owner, repo: r.repo, state: 'all', sort: 'updated', direction: 'desc',
+              });
+              data.push({ r, recentIssues, openIssues, pulls: pulls.slice(0, 200) });
+            }
+            const homeData = data.find(d => isHome(d.r)) || { r: home, recentIssues: [], openIssues: [], pulls: [] };
+
+            // ── 📝 doc-drafter: 문서반영 대기 ─────────────
+            const draftLines = [];
+            for (const i of homeData.openIssues.filter(i => i.labels.some(l => l.name === '문서반영'))) {
+              const pr = homeData.pulls.find(p => new RegExp(`#${i.number}\\b`).test(p.body || ''));
+              const state = pr ? (pr.merged_at ? `PR #${pr.number} merge됨 → 이슈 닫기 확인` : `PR #${pr.number} 진행 중`) : '**반영 PR 없음**';
+              draftLines.push(`- ${link(homeData.r, i.number, i.title)} — ${state}`);
+            }
+
+            // ── 🔍 consistency-checker: 리뷰 대기 문서 PR ──
+            const checkLines = [];
+            for (const p of homeData.pulls.filter(p => p.state === 'open')) {
+              const files = await listAll(reader.rest.pulls.listFiles, { owner: home.owner, repo: home.repo, pull_number: p.number });
+              if (files.some(f => f.filename.startsWith('docs/') || f.filename === 'AGENTS.md')) {
+                checkLines.push(`- [#${p.number}](${p.html_url}) ${p.title} — 변경 문서 ${files.length}개`);
+              }
+            }
+
+            // ── 🔗 issue-linker: 어제 생성된 이슈 중 근거 링크 없음 ──
+            const linkLines = [];
+            for (const d of data) {
+              const created = d.recentIssues.filter(i => !i.pull_request && new Date(i.created_at) >= since);
+              for (const i of created) {
+                if (isHome(d.r) && !i.labels.some(l => ['논의', '구현', '버그'].includes(l.name))) continue; // wiki 회의 이슈 제외
+                const comments = i.comments ? await listAll(reader.rest.issues.listComments, { owner: d.r.owner, repo: d.r.repo, issue_number: i.number }) : [];
+                const linked = comments.some(c => /관련 자료/.test(c.body || '')) || /KTB4-5th-wiki|docs\/(context|api|decisions)/.test(i.body || '');
+                if (!linked) linkLines.push(`- ${link(d.r, i.number, i.title)} (${partOf(i.labels)})`);
+              }
+            }
+
+            // ── 📊 progress-reporter: 지난 24시간 변화 ──
+            const progRows = [];
+            const progLines = [];
+            for (const d of data) {
+              const closed = d.recentIssues.filter(i => !i.pull_request && i.closed_at && new Date(i.closed_at) >= since);
+              const merged = d.pulls.filter(p => p.merged_at && new Date(p.merged_at) >= since);
+              progRows.push(`| ${d.r.repo} | ${d.openIssues.length} | ${closed.length} | ${merged.length} |`);
+              closed.forEach(i => progLines.push(`- 닫힘: ${link(d.r, i.number, i.title)}`));
+              merged.forEach(p => progLines.push(`- merge: [${isHome(d.r) ? '' : d.r.repo}#${p.number}](${p.html_url}) ${p.title}`));
+            }
+
+            let boardLine = '';
+            const m = (process.env.PROJECT_URL || '').match(/github\.com\/orgs\/([^/]+)\/projects\/(\d+)/);
+            if (m && process.env.PROJECT_TOKEN) {
+              try {
+                const counts = {};
+                let cursor = null;
+                do {
+                  const res = await reader.graphql(`query($org:String!,$num:Int!,$after:String){
+                    organization(login:$org){ projectV2(number:$num){ items(first:100, after:$after){
+                      pageInfo{ hasNextPage endCursor }
+                      nodes{ fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue{ name } } }
+                    } } } }`, { org: m[1], num: Number(m[2]), after: cursor });
+                  const items = res.organization.projectV2.items;
+                  items.nodes.forEach(n => { const s = n.fieldValueByName?.name || '상태 없음'; counts[s] = (counts[s] || 0) + 1; });
+                  cursor = items.pageInfo.hasNextPage ? items.pageInfo.endCursor : null;
+                } while (cursor);
+                boardLine = '보드 상태: ' + Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(' / ');
+              } catch (e) { boardLine = `보드 조회 실패: ${e.message}`; }
+            }
+
+            // ── 브리프 작성 ─────────────────────────────
+            const section = (title, agent, lines, empty) =>
+              `### ${title}\n> 실행할 에이전트: [${agent}](https://github.com/${home.owner}/${home.repo}/blob/main/docs/agents/${agent}.md)\n\n${lines.length ? lines.join('\n') : `- ${empty}`}\n`;
+
+            const body = [
+              `## 🌅 ${kstDate} 에이전트 브리프`,
+              `기준: 지난 24시간 · 대상 레포 ${repos.length}개`,
+              '',
+              section('📝 문서 반영 대기', 'doc-drafter', draftLines, '`문서반영` 라벨이 붙은 열린 이슈 없음'),
+              section('🔍 불일치 확인이 필요한 문서 PR', 'consistency-checker', checkLines, '리뷰 대기 중인 문서 PR 없음'),
+              section('🔗 근거 링크가 없는 새 이슈', 'issue-linker', linkLines, '어제 생성된 이슈 모두 링크 있음 (또는 새 이슈 없음)'),
+              `### 📊 진행 상황\n> 실행할 에이전트: [progress-reporter](https://github.com/${home.owner}/${home.repo}/blob/main/docs/agents/progress-reporter.md)\n`,
+              '| 레포 | 열린 이슈 | 닫힌 이슈(24h) | merge된 PR(24h) |',
+              '|---|---:|---:|---:|',
+              ...progRows,
+              '',
+              boardLine,
+              ...(progLines.length ? progLines : ['- 지난 24시간 닫힌 이슈·merge된 PR 없음']),
+              '',
+              '<sub>이 브리프는 GitHub 데이터를 그대로 모은 것이며 우선순위·지연 판단을 포함하지 않습니다.</sub>',
+            ].join('\n');
+
+            await core.summary.addRaw(body).write();
+
+            // 브리프 이슈 찾기 또는 생성
+            const TITLE = '[Agent Brief] 매일 아침 에이전트 브리프';
+            const open = await github.paginate(github.rest.issues.listForRepo, { ...home, state: 'open', per_page: 100 });
+            let issue = open.find(i => i.title === TITLE && !i.pull_request);
+            if (!issue) {
+              issue = (await github.rest.issues.create({
+                ...home, title: TITLE,
+                body: '매일 오전 9시(KST)에 `daily-agent-brief` 워크플로가 에이전트별 확인 항목을 댓글로 남깁니다.\n구독(Subscribe)하면 알림으로 받을 수 있습니다. 구조는 `docs/agents/README.md`를 참고하세요.',
+              })).data;
+            }
+            const comment = await github.rest.issues.createComment({ ...home, issue_number: issue.number, body });
+
+            // 디스코드 (선택)
+            if (process.env.DISCORD_WEBHOOK_URL) {
+              const short = [
+                `🌅 **${kstDate} 에이전트 브리프**`,
+                `📝 문서 반영 대기 ${draftLines.length}건 · 🔍 문서 PR ${checkLines.length}건 · 🔗 링크 없는 새 이슈 ${linkLines.length}건`,
+                boardLine,
+                comment.data.html_url,
+              ].filter(Boolean).join('\n');
+              await fetch(process.env.DISCORD_WEBHOOK_URL, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: short.slice(0, 1900) }),
+              });
+            }
