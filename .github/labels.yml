@@ -1,0 +1,25 @@
+# 공통 라벨. 파트 레포에도 같은 파일을 복사해 label-sync 워크플로로 맞춘다.
+- name: BE
+  color: "1d76db"
+  description: 백엔드
+- name: FE
+  color: "0e8a16"
+  description: 프론트엔드
+- name: AI
+  color: "5319e7"
+  description: AI
+- name: Cloud
+  color: "fbca04"
+  description: 클라우드·인프라
+- name: 논의
+  color: "c5def5"
+  description: 기능 논의·정책 결정
+- name: 문서반영
+  color: "d4c5f9"
+  description: 최종 결론을 wiki 문서에 반영해야 함
+- name: 구현
+  color: "bfdadc"
+  description: 구현 작업
+- name: 버그
+  color: "d73a4a"
+  description: 버그
