@@ -87,6 +87,10 @@ jobs:
           query["wait"] = "true"
           webhook = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
           kind = "이슈 댓글" if "comment" in event else "이슈 본문"
+          # 알림 본문에 이슈와 멘션된 댓글로 이동하는 링크를 명시한다.
+          links = f"[이슈 바로가기]({issue['html_url']})"
+          if "comment" in event:
+              links += f" · [댓글 바로가기]({item['html_url']})"
           payload = {
               "content": content,
               # 등록된 대상만 멘션하고 everyone·here·역할 멘션은 허용하지 않는다.
@@ -94,7 +98,7 @@ jobs:
               "embeds": [{
                   "title": f"#{issue['number']} {issue['title']}"[:256],
                   "url": item["html_url"],
-                  "description": f"{kind}에서 GitHub 계정이 멘션되었습니다.",
+                  "description": f"{kind}에서 GitHub 계정이 멘션되었습니다.\n\n{links}",
                   "fields": [
                       {"name": "저장소", "value": event["repository"]["full_name"]},
                       {"name": "작성·수정자", "value": event["sender"]["login"]},
